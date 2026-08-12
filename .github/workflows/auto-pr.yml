@@ -1,0 +1,60 @@
+name: Cluster staging PR
+
+on:
+  push:
+    branches:
+      - cluster-staging
+    paths:
+      - "clusters/**"
+  pull_request:
+    types: [closed]
+    branches:
+      - main
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  create-pr:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create or reuse the cluster PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          if gh pr list \
+            --repo "${{ github.repository }}" \
+            --head "cluster-staging" \
+            --base "main" \
+            --state open \
+            --json number \
+            --jq 'length' | grep -q '^0$'; then
+            gh pr create \
+              --repo "${{ github.repository }}" \
+              --head "cluster-staging" \
+              --base "main" \
+              --title "GKE Cluster Portal: cluster changes" \
+              --body $'Automated PR created by the GKE Cluster Portal.\n\nChanges under `clusters/` are collected on the shared `cluster-staging` branch. Review and merge this PR to promote them to `main`.'
+          else
+            echo "An open cluster-staging -> main PR already exists; new commits will appear in it automatically."
+          fi
+
+  reset-staging-after-merge:
+    if: github.event_name == 'pull_request' && github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    steps:
+      - name: Reset shared staging branch to main
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh api \
+            --method PATCH \
+            -H "Accept: application/vnd.github+json" \
+            "/repos/${{ github.repository }}/git/refs/heads/cluster-staging" \
+            -f sha="${{ github.event.pull_request.merge_commit_sha }}" \
+            -F force=true
