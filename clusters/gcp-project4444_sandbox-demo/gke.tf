@@ -19,8 +19,8 @@ module "gke" {
       machine_type = "n2d-standard-8"
       min_count = 1
       max_count = 20
-      image_type = "COS_CONTAINERD"
-      auto_repair = true
+      image_type = "UBUNTU_CONTAINERD"
+      auto_repair = false
       auto_upgrade = true
       preemptible = false
       initial_node_count = 1
