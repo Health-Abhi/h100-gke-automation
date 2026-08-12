@@ -1,4 +1,4 @@
-name: Cluster staging PR
+name: Create Cluster PR
 
 on:
   push:
@@ -6,55 +6,124 @@ on:
       - cluster-staging
     paths:
       - "clusters/**"
-  pull_request:
-    types: [closed]
-    branches:
-      - main
 
+# Prevent multiple workflow runs from trying to create
+# the same PR at the same time.
+concurrency:
+  group: cluster-staging-pr
+  cancel-in-progress: false
+
+# The workflow's default GITHUB_TOKEN only needs read access.
+# PR creation is handled by the GH_PR_TOKEN secret.
 permissions:
-  contents: write
-  pull-requests: write
+  contents: read
 
 jobs:
   create-pr:
-    if: github.event_name == 'push'
+    name: Create or Update Cluster PR
     runs-on: ubuntu-latest
+
     steps:
-      - name: Create or reuse the cluster PR
+      # Checkout the repository.
+      # This uses the default GITHUB_TOKEN and only needs read access.
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # Make sure GitHub CLI is available.
+      - name: Check GitHub CLI
+        run: |
+          gh --version
+
+      # Create the PR if one does not already exist.
+      - name: Create Pull Request
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.GH_PR_TOKEN }}
         run: |
           set -euo pipefail
 
-          if gh pr list \
-            --repo "${{ github.repository }}" \
-            --head "cluster-staging" \
-            --base "main" \
+          REPO="${{ github.repository }}"
+          HEAD_BRANCH="cluster-staging"
+          BASE_BRANCH="main"
+
+          echo "Repository: ${REPO}"
+          echo "Source branch: ${HEAD_BRANCH}"
+          echo "Target branch: ${BASE_BRANCH}"
+
+          echo ""
+          echo "Checking for an existing open Pull Request..."
+
+          PR_COUNT=$(gh pr list \
+            --repo "${REPO}" \
+            --head "${HEAD_BRANCH}" \
+            --base "${BASE_BRANCH}" \
             --state open \
             --json number \
-            --jq 'length' | grep -q '^0$'; then
-            gh pr create \
-              --repo "${{ github.repository }}" \
-              --head "cluster-staging" \
-              --base "main" \
-              --title "GKE Cluster Portal: cluster changes" \
-              --body $'Automated PR created by the GKE Cluster Portal.\n\nChanges under `clusters/` are collected on the shared `cluster-staging` branch. Review and merge this PR to promote them to `main`.'
-          else
-            echo "An open cluster-staging -> main PR already exists; new commits will appear in it automatically."
-          fi
+            --jq 'length')
 
-  reset-staging-after-merge:
-    if: github.event_name == 'pull_request' && github.event.pull_request.merged == true
-    runs-on: ubuntu-latest
-    steps:
-      - name: Reset shared staging branch to main
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          gh api \
-            --method PATCH \
-            -H "Accept: application/vnd.github+json" \
-            "/repos/${{ github.repository }}/git/refs/heads/cluster-staging" \
-            -f sha="${{ github.event.pull_request.merge_commit_sha }}" \
-            -F force=true
+          echo "Open PR count: ${PR_COUNT}"
+
+          if [ "${PR_COUNT}" -eq 0 ]; then
+
+            echo ""
+            echo "No open PR found."
+            echo "Creating Pull Request..."
+
+            PR_URL=$(gh pr create \
+              --repo "${REPO}" \
+              --head "${HEAD_BRANCH}" \
+              --base "${BASE_BRANCH}" \
+              --title "GKE Cluster Portal: cluster changes" \
+              --body "$(cat <<'EOF'
+          ## GKE Cluster Changes
+
+          This Pull Request was automatically created by the GKE Cluster Portal.
+
+          Cluster configuration changes are collected on the shared:
+
+          `cluster-staging`
+
+          branch.
+
+          ### Changes
+
+          Terraform cluster configurations are located under:
+
+          `clusters/`
+
+          Please review the changes before merging this Pull Request into `main`.
+
+          ### Flow
+
+          GKE Portal
+          → cluster-staging
+          → automated Pull Request
+          → main
+
+          This PR will automatically receive additional commits when new
+          cluster configurations are submitted through the GKE Cluster Portal.
+          EOF
+            )")
+
+            echo ""
+            echo "=========================================="
+            echo "Pull Request created successfully"
+            echo "=========================================="
+            echo "PR URL: ${PR_URL}"
+
+          else
+
+            echo ""
+            echo "=========================================="
+            echo "An open Pull Request already exists."
+            echo "New commits will automatically appear in it."
+            echo "=========================================="
+
+            gh pr list \
+              --repo "${REPO}" \
+              --head "${HEAD_BRANCH}" \
+              --base "${BASE_BRANCH}" \
+              --state open \
+              --json number,title,url \
+              --template '{{range .}}PR #{{.number}}: {{.title}}{{"\n"}}{{.url}}{{"\n"}}{{end}}'
+
+          fi
