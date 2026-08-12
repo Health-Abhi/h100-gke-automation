@@ -7,16 +7,12 @@ on:
     paths:
       - "clusters/**"
 
-# Prevent multiple workflow runs from trying to create
-# the same PR at the same time.
 concurrency:
   group: cluster-staging-pr
   cancel-in-progress: false
 
-# The workflow's default GITHUB_TOKEN only needs read access.
-# PR creation is handled by the GH_PR_TOKEN secret.
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   create-pr:
@@ -24,106 +20,216 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # Checkout the repository.
-      # This uses the default GITHUB_TOKEN and only needs read access.
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      # Make sure GitHub CLI is available.
       - name: Check GitHub CLI
         run: |
           gh --version
 
-      # Create the PR if one does not already exist.
-      - name: Create Pull Request
+      - name: Create PR for new cluster folder
         env:
           GH_TOKEN: ${{ secrets.GH_PR_TOKEN }}
         run: |
           set -euo pipefail
 
           REPO="${{ github.repository }}"
-          HEAD_BRANCH="cluster-staging"
+          SOURCE_BRANCH="cluster-staging"
           BASE_BRANCH="main"
 
           echo "Repository: ${REPO}"
-          echo "Source branch: ${HEAD_BRANCH}"
+          echo "Source branch: ${SOURCE_BRANCH}"
           echo "Target branch: ${BASE_BRANCH}"
 
+          git fetch origin "${BASE_BRANCH}" "${SOURCE_BRANCH}"
+
           echo ""
-          echo "Checking for an existing open Pull Request..."
+          echo "Finding changed files..."
 
-          PR_COUNT=$(gh pr list \
-            --repo "${REPO}" \
-            --head "${HEAD_BRANCH}" \
-            --base "${BASE_BRANCH}" \
-            --state open \
-            --json number \
-            --jq 'length')
+          CHANGED_FILES=$(git diff \
+            --name-only \
+            "origin/${BASE_BRANCH}...origin/${SOURCE_BRANCH}")
 
-          echo "Open PR count: ${PR_COUNT}"
+          echo "Changed files:"
+          echo "${CHANGED_FILES}"
 
-          if [ "${PR_COUNT}" -eq 0 ]; then
+          echo ""
+          echo "Finding cluster folders..."
+
+          CLUSTER_FOLDERS=$(echo "${CHANGED_FILES}" \
+            | grep '^clusters/' \
+            | cut -d'/' -f2 \
+            | sort -u)
+
+          if [ -z "${CLUSTER_FOLDERS}" ]; then
+            echo "No cluster folders found."
+            exit 0
+          fi
+
+          echo "Cluster folders:"
+          echo "${CLUSTER_FOLDERS}"
+
+          for CLUSTER_NAME in ${CLUSTER_FOLDERS}; do
 
             echo ""
-            echo "No open PR found."
-            echo "Creating Pull Request..."
+            echo "=========================================="
+            echo "Processing cluster: ${CLUSTER_NAME}"
+            echo "=========================================="
 
-            PR_URL=$(gh pr create \
+            SOURCE_PATH="clusters/${CLUSTER_NAME}"
+            TARGET_PATH="${CLUSTER_NAME}"
+
+            echo "Source: ${SOURCE_PATH}"
+            echo "Target: ${TARGET_PATH}"
+
+            #
+            # Check whether this folder already exists in main.
+            #
+            if git ls-tree -d "origin/${BASE_BRANCH}" -- "${TARGET_PATH}" \
+              | grep -q "${TARGET_PATH}"; then
+
+              echo ""
+              echo "Folder ${TARGET_PATH} already exists in main."
+              echo "Skipping."
+
+              continue
+            fi
+
+            #
+            # Create a temporary branch from main.
+            #
+            PR_BRANCH="cluster/${CLUSTER_NAME}"
+
+            echo ""
+            echo "Creating branch: ${PR_BRANCH}"
+
+            git checkout -B "${PR_BRANCH}" "origin/${BASE_BRANCH}"
+
+            #
+            # Copy ONLY the new cluster folder from
+            # cluster-staging into the root of the repository.
+            #
+            echo ""
+            echo "Copying ${SOURCE_PATH} → ${TARGET_PATH}"
+
+            git archive "origin/${SOURCE_BRANCH}:${SOURCE_PATH}" \
+              | tar -x
+
+            mkdir -p "${TARGET_PATH}"
+
+            git archive "origin/${SOURCE_BRANCH}:${SOURCE_PATH}" \
+              | tar -x -C "${TARGET_PATH}"
+
+            #
+            # Show what will be committed.
+            #
+            echo ""
+            echo "Files to be committed:"
+
+            git status --short
+
+            #
+            # Commit the new cluster.
+            #
+            git add "${TARGET_PATH}"
+
+            if git diff --cached --quiet; then
+              echo "No changes to commit."
+              continue
+            fi
+
+            git commit \
+              -m "Add GKE cluster ${CLUSTER_NAME}"
+
+            #
+            # Push temporary branch.
+            #
+            echo ""
+            echo "Pushing ${PR_BRANCH}..."
+
+            git push \
+              --force-with-lease \
+              origin "${PR_BRANCH}"
+
+            #
+            # Check whether PR already exists.
+            #
+            PR_COUNT=$(gh pr list \
               --repo "${REPO}" \
-              --head "${HEAD_BRANCH}" \
+              --head "${PR_BRANCH}" \
               --base "${BASE_BRANCH}" \
-              --title "GKE Cluster Portal: cluster changes" \
-              --body "$(cat <<'EOF'
+              --state open \
+              --json number \
+              --jq 'length')
+
+            echo "Open PR count: ${PR_COUNT}"
+
+            if [ "${PR_COUNT}" -eq 0 ]; then
+
+              echo ""
+              echo "Creating Pull Request..."
+
+              PR_URL=$(gh pr create \
+                --repo "${REPO}" \
+                --head "${PR_BRANCH}" \
+                --base "${BASE_BRANCH}" \
+                --title "GKE Cluster Portal: ${CLUSTER_NAME}" \
+                --body "$(cat <<EOF
           ## GKE Cluster Changes
 
           This Pull Request was automatically created by the GKE Cluster Portal.
 
-          Cluster configuration changes are collected on the shared:
+          ### Cluster
 
-          `cluster-staging`
+          \`${CLUSTER_NAME}\`
 
-          branch.
+          ### Source
 
-          ### Changes
+          The cluster configuration was submitted through:
 
-          Terraform cluster configurations are located under:
+          \`cluster-staging/clusters/${CLUSTER_NAME}\`
 
-          `clusters/`
+          ### Destination
 
-          Please review the changes before merging this Pull Request into `main`.
+          The cluster will be added to the root of the repository:
+
+          \`${CLUSTER_NAME}/\`
 
           ### Flow
 
           GKE Portal
           → cluster-staging
-          → automated Pull Request
+          → temporary cluster branch
+          → Pull Request
           → main
 
-          This PR will automatically receive additional commits when new
-          cluster configurations are submitted through the GKE Cluster Portal.
+          Only the new cluster folder is included in this Pull Request.
           EOF
-            )")
+              )")
 
-            echo ""
-            echo "=========================================="
-            echo "Pull Request created successfully"
-            echo "=========================================="
-            echo "PR URL: ${PR_URL}"
+              echo ""
+              echo "=========================================="
+              echo "Pull Request created successfully"
+              echo "=========================================="
+              echo "PR URL: ${PR_URL}"
 
-          else
+            else
 
-            echo ""
-            echo "=========================================="
-            echo "An open Pull Request already exists."
-            echo "New commits will automatically appear in it."
-            echo "=========================================="
+              echo ""
+              echo "=========================================="
+              echo "Pull Request already exists."
+              echo "=========================================="
 
-            gh pr list \
-              --repo "${REPO}" \
-              --head "${HEAD_BRANCH}" \
-              --base "${BASE_BRANCH}" \
-              --state open \
-              --json number,title,url \
-              --template '{{range .}}PR #{{.number}}: {{.title}}{{"\n"}}{{.url}}{{"\n"}}{{end}}'
+              gh pr list \
+                --repo "${REPO}" \
+                --head "${PR_BRANCH}" \
+                --base "${BASE_BRANCH}" \
+                --state open \
+                --json number,title,url \
+                --template '{{range .}}PR #{{.number}}: {{.title}}{{"\n"}}{{.url}}{{"\n"}}{{end}}'
 
-          fi
+            fi
+
+          done
