@@ -20,16 +20,33 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      # ---------------------------------------------------------
+      # Checkout repository
+      # ---------------------------------------------------------
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
+      # ---------------------------------------------------------
+      # Configure Git
+      # ---------------------------------------------------------
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      # ---------------------------------------------------------
+      # Check GitHub CLI
+      # ---------------------------------------------------------
       - name: Check GitHub CLI
         run: |
           gh --version
 
-      - name: Create PR for new cluster folder
+      # ---------------------------------------------------------
+      # Create Pull Request
+      # ---------------------------------------------------------
+      - name: Create Pull Request
         env:
           GH_TOKEN: ${{ secrets.GH_PR_TOKEN }}
         run: |
@@ -39,12 +56,24 @@ jobs:
           SOURCE_BRANCH="cluster-staging"
           BASE_BRANCH="main"
 
+          echo "=========================================="
           echo "Repository: ${REPO}"
           echo "Source branch: ${SOURCE_BRANCH}"
           echo "Target branch: ${BASE_BRANCH}"
+          echo "=========================================="
 
-          git fetch origin "${BASE_BRANCH}" "${SOURCE_BRANCH}"
+          # -----------------------------------------------------
+          # Fetch latest branches
+          # -----------------------------------------------------
+          echo ""
+          echo "Fetching branches..."
 
+          git fetch origin "${BASE_BRANCH}"
+          git fetch origin "${SOURCE_BRANCH}"
+
+          # -----------------------------------------------------
+          # Find changed files
+          # -----------------------------------------------------
           echo ""
           echo "Finding changed files..."
 
@@ -52,25 +81,44 @@ jobs:
             --name-only \
             "origin/${BASE_BRANCH}...origin/${SOURCE_BRANCH}")
 
+          echo ""
           echo "Changed files:"
           echo "${CHANGED_FILES}"
 
+          # -----------------------------------------------------
+          # Find cluster folders
+          #
+          # Example:
+          #
+          # clusters/
+          #   gcp-project4444_sandbox-demo/
+          #     gke.tf
+          #
+          # Extracts:
+          #
+          # gcp-project4444_sandbox-demo
+          # -----------------------------------------------------
           echo ""
           echo "Finding cluster folders..."
 
           CLUSTER_FOLDERS=$(echo "${CHANGED_FILES}" \
             | grep '^clusters/' \
             | cut -d'/' -f2 \
-            | sort -u)
+            | sort -u || true)
 
           if [ -z "${CLUSTER_FOLDERS}" ]; then
+            echo ""
             echo "No cluster folders found."
             exit 0
           fi
 
+          echo ""
           echo "Cluster folders:"
           echo "${CLUSTER_FOLDERS}"
 
+          # -----------------------------------------------------
+          # Process each cluster folder
+          # -----------------------------------------------------
           for CLUSTER_NAME in ${CLUSTER_FOLDERS}; do
 
             echo ""
@@ -80,82 +128,127 @@ jobs:
 
             SOURCE_PATH="clusters/${CLUSTER_NAME}"
             TARGET_PATH="${CLUSTER_NAME}"
+            PR_BRANCH="cluster/${CLUSTER_NAME}"
 
-            echo "Source: ${SOURCE_PATH}"
-            echo "Target: ${TARGET_PATH}"
+            echo "Source:"
+            echo "  ${SOURCE_PATH}"
 
-            #
-            # Check whether this folder already exists in main.
-            #
+            echo "Target:"
+            echo "  ${TARGET_PATH}"
+
+            echo "PR branch:"
+            echo "  ${PR_BRANCH}"
+
+            # ---------------------------------------------------
+            # Check if cluster already exists in main
+            # ---------------------------------------------------
+            echo ""
+            echo "Checking whether cluster already exists in main..."
+
             if git ls-tree -d "origin/${BASE_BRANCH}" -- "${TARGET_PATH}" \
               | grep -q "${TARGET_PATH}"; then
 
               echo ""
-              echo "Folder ${TARGET_PATH} already exists in main."
-              echo "Skipping."
+              echo "Cluster ${TARGET_PATH} already exists in main."
+              echo "Skipping this cluster."
 
               continue
             fi
 
-            #
-            # Create a temporary branch from main.
-            #
-            PR_BRANCH="cluster/${CLUSTER_NAME}"
-
+            # ---------------------------------------------------
+            # Create temporary branch from main
+            # ---------------------------------------------------
             echo ""
-            echo "Creating branch: ${PR_BRANCH}"
+            echo "Creating branch from main..."
 
             git checkout -B "${PR_BRANCH}" "origin/${BASE_BRANCH}"
 
-            #
-            # Copy ONLY the new cluster folder from
-            # cluster-staging into the root of the repository.
-            #
-            echo ""
-            echo "Copying ${SOURCE_PATH} → ${TARGET_PATH}"
+            # ---------------------------------------------------
+            # Remove any existing target directory
+            # ---------------------------------------------------
+            rm -rf "${TARGET_PATH}"
 
-            git archive "origin/${SOURCE_BRANCH}:${SOURCE_PATH}" \
-              | tar -x
-
+            # ---------------------------------------------------
+            # Create target directory
+            # ---------------------------------------------------
             mkdir -p "${TARGET_PATH}"
 
-            git archive "origin/${SOURCE_BRANCH}:${SOURCE_PATH}" \
-              | tar -x -C "${TARGET_PATH}"
-
+            # ---------------------------------------------------
+            # Copy cluster files
             #
-            # Show what will be committed.
+            # SOURCE:
             #
+            # cluster-staging:
+            # clusters/<cluster-name>/*
+            #
+            # DESTINATION:
+            #
+            # main:
+            # <cluster-name>/*
+            # ---------------------------------------------------
             echo ""
-            echo "Files to be committed:"
+            echo "Copying cluster files..."
+
+            git archive "origin/${SOURCE_BRANCH}" "${SOURCE_PATH}" \
+              | tar -x --strip-components=2 -C "${TARGET_PATH}"
+
+            # ---------------------------------------------------
+            # Show copied files
+            # ---------------------------------------------------
+            echo ""
+            echo "Files after copy:"
+
+            find "${TARGET_PATH}" -type f -print
+
+            # ---------------------------------------------------
+            # Show Git status
+            # ---------------------------------------------------
+            echo ""
+            echo "Git status:"
 
             git status --short
 
-            #
-            # Commit the new cluster.
-            #
+            # ---------------------------------------------------
+            # Add only the target cluster folder
+            # ---------------------------------------------------
             git add "${TARGET_PATH}"
 
+            # ---------------------------------------------------
+            # Check if there are changes
+            # ---------------------------------------------------
             if git diff --cached --quiet; then
-              echo "No changes to commit."
+
+              echo ""
+              echo "No changes detected for ${CLUSTER_NAME}."
               continue
+
             fi
+
+            # ---------------------------------------------------
+            # Commit
+            # ---------------------------------------------------
+            echo ""
+            echo "Creating commit..."
 
             git commit \
               -m "Add GKE cluster ${CLUSTER_NAME}"
 
-            #
-            # Push temporary branch.
-            #
+            # ---------------------------------------------------
+            # Push temporary branch
+            # ---------------------------------------------------
             echo ""
-            echo "Pushing ${PR_BRANCH}..."
+            echo "Pushing branch ${PR_BRANCH}..."
 
             git push \
               --force-with-lease \
               origin "${PR_BRANCH}"
 
-            #
-            # Check whether PR already exists.
-            #
+            # ---------------------------------------------------
+            # Check existing PR
+            # ---------------------------------------------------
+            echo ""
+            echo "Checking for existing Pull Request..."
+
             PR_COUNT=$(gh pr list \
               --repo "${REPO}" \
               --head "${PR_BRANCH}" \
@@ -166,6 +259,9 @@ jobs:
 
             echo "Open PR count: ${PR_COUNT}"
 
+            # ---------------------------------------------------
+            # Create PR if one doesn't exist
+            # ---------------------------------------------------
             if [ "${PR_COUNT}" -eq 0 ]; then
 
               echo ""
@@ -187,7 +283,7 @@ jobs:
 
           ### Source
 
-          The cluster configuration was submitted through:
+          Cluster configuration submitted to:
 
           \`cluster-staging/clusters/${CLUSTER_NAME}\`
 
@@ -200,12 +296,20 @@ jobs:
           ### Flow
 
           GKE Portal
-          → cluster-staging
-          → temporary cluster branch
-          → Pull Request
-          → main
+          ↓
+          cluster-staging
+          ↓
+          cluster/${CLUSTER_NAME}
+          ↓
+          Pull Request
+          ↓
+          main
 
-          Only the new cluster folder is included in this Pull Request.
+          ### Important
+
+          Only the \`${CLUSTER_NAME}\` cluster folder is included in this Pull Request.
+
+          Other changes in \`cluster-staging\` are not copied to \`main\`.
           EOF
               )")
 
@@ -219,7 +323,7 @@ jobs:
 
               echo ""
               echo "=========================================="
-              echo "Pull Request already exists."
+              echo "Pull Request already exists"
               echo "=========================================="
 
               gh pr list \
